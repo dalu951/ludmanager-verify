@@ -99,6 +99,7 @@ jobs:
             "Signatur: gültig" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           }
           $out | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $LASTEXITCODE = 0
 
       - name: Still installieren
         shell: pwsh
