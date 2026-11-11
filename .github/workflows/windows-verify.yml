@@ -164,7 +164,11 @@ jobs:
           & $env:SIGNTOOL verify /pa /all $exe 2>&1 | Out-Host
           if ($LASTEXITCODE -ne 0) {
             if ('${{ inputs.require_signature }}' -eq 'true') { throw 'Ludmanager.exe ist nicht gültig signiert.' }
+            "WARNUNG: Ludmanager.exe ist unsigniert (require_signature=false)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           }
+          # signtool laesst $LASTEXITCODE auf 1 stehen; ohne das Zuruecksetzen scheitert der
+          # Schritt trotz bestandener (oder bewusst erlaubter) Pruefung.
+          $LASTEXITCODE = 0
 
       - name: App startet und lebt
         shell: pwsh
