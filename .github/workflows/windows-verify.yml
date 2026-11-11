@@ -104,8 +104,15 @@ jobs:
       - name: Still installieren
         shell: pwsh
         run: |
-          # perMachine: false -> Installation für den aktuellen Benutzer.
-          $p = Start-Process -FilePath $env:INSTALLER -ArgumentList '/currentuser', '/S' -Wait -PassThru
+          # perMachine: false -> Installation fuer den aktuellen Benutzer.
+          # --updated haelt den Installer davon ab, die App nach dem Einrichten zu starten:
+          # ein laufender Ludmanager erbt die Handles und laesst jeden Wait auf den
+          # Installer ewig haengen (genau das ist im ersten Lauf passiert).
+          $p = Start-Process -FilePath $env:INSTALLER -ArgumentList '/currentuser', '/S', '--updated' -PassThru
+          if (-not $p.WaitForExit(900000)) {
+            Get-Process | Where-Object { $_.ProcessName -match 'Ludmanager' } | Select-Object Id, ProcessName, StartTime | Out-Host
+            throw 'Installer hat nach 15 Minuten nicht beendet'
+          }
           if ($p.ExitCode -ne 0) { throw "Installer endete mit $($p.ExitCode)" }
           Start-Sleep -Seconds 5
 
