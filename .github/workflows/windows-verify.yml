@@ -102,6 +102,32 @@ jobs:
           "INSTALLER=$file" | Out-File -FilePath $env:GITHUB_ENV -Append
           "INSTALLER_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Defender prüft den Installer
+        shell: pwsh
+        run: |
+          # Gate 3 von Ticket 34: der obfuskierte Bau soll Defender nicht wecken.
+          # SmartScreen lässt sich auf einem Runner nicht auslösen (keine Reputation,
+          # niemand klickt den Dialog weg) - das bleibt Handarbeit am echten Desktop.
+          $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+          if (-not (Test-Path $mp)) {
+            'WARNUNG: MpCmdRun.exe fehlt - Scan uebersprungen.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return
+          }
+          & $mp -SignatureUpdate 2>&1 | Out-Host
+          $out = & $mp -Scan -ScanType 3 -File $env:INSTALLER 2>&1
+          $code = $LASTEXITCODE
+          $out | Out-Host
+          "Defender (MpCmdRun -Scan -ScanType 3): Exit $code" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $out | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $LASTEXITCODE = 0
+          if ($code -eq 0) {
+            'Defender: keine Fundstelle am Installer.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } elseif ($code -eq 2) {
+            throw 'Defender meldet den Installer als Bedrohung (MpCmdRun Exit 2).'
+          } else {
+            "WARNUNG: Defender-Scan endete mit Exit $code (kein Fund gemeldet)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
       - name: signtool finden
         shell: pwsh
         run: |
