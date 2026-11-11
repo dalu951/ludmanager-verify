@@ -46,12 +46,25 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'ludmanager-verify'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           $file = Join-Path $dir 'installer.exe'
-          # Das Artefakt liegt in einem privaten Repo; der Lauf hier ist oeffentlich (freie Minuten).
-          $headers = @{}
-          if ($env:INSTALLER_TOKEN) {
-            $headers['Authorization'] = "Bearer $env:INSTALLER_TOKEN"
+          $geholt = $false
+          # Release-Assets privater Repos liefert GitHub nur ueber die API; die Browser-URL
+          # antwortet ohne Anmeldung mit 404. gh kennt den Weg und nimmt den Lesetoken.
+          if ($env:INSTALLER_TOKEN -and $env:INSTALLER_URL -match '^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)$') {
+            $owner = $matches[1]; $repo = $matches[2]; $tag = $matches[3]; $name = $matches[4]
+            $env:GH_TOKEN = $env:INSTALLER_TOKEN
+            $zwischen = Join-Path $env:RUNNER_TEMP 'gh-download'
+            New-Item -ItemType Directory -Force -Path $zwischen | Out-Null
+            gh release download $tag --repo "$owner/$repo" --pattern $name --dir $zwischen --clobber
+            if ($LASTEXITCODE -eq 0) {
+              Copy-Item -Path (Join-Path $zwischen $name) -Destination $file -Force
+              $geholt = $true
+            }
           }
-          Invoke-WebRequest -Uri $env:INSTALLER_URL -Headers $headers -OutFile $file -MaximumRetryCount 3
+          if (-not $geholt) {
+            $headers = @{}
+            if ($env:INSTALLER_TOKEN) { $headers['Authorization'] = "Bearer $env:INSTALLER_TOKEN" }
+            Invoke-WebRequest -Uri $env:INSTALLER_URL -Headers $headers -OutFile $file -MaximumRetryCount 3
+          }
           $hash = (Get-FileHash -Algorithm SHA256 $file).Hash
           "SHA256: $hash" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           "INSTALLER=$file" | Out-File -FilePath $env:GITHUB_ENV -Append
