@@ -16,9 +16,9 @@ on:
         description: 'URL des Installers (leer = Repository-Variable LUDMANAGER_INSTALLER_URL)'
         required: false
       require_signature:
-        description: 'Signatur verlangen (für interne Testartefakte auf false stellen)'
+        description: 'Signatur verlangen (das heutige Testartefakt ist unsigniert, daher false)'
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
