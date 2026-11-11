@@ -40,6 +40,32 @@ jobs:
           }
           "Installationsquelle: $env:INSTALLER_URL" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
+      - name: Token-Rechte prüfen
+        shell: pwsh
+        run: |
+          # Der private Weg braucht ein Fine-grained PAT mit Repository-Zugriff auf das
+          # Build-Repo und "Contents: Read". Ohne diese Zeile raet man bei einem Fehlschlag,
+          # ob das Secret fehlt oder nur falsch gescopt ist.
+          if (-not $env:INSTALLER_TOKEN) {
+            "Kein INSTALLER_TOKEN gesetzt - der Lauf ist auf ein oeffentliches Asset angewiesen." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return
+          }
+          if ($env:INSTALLER_URL -notmatch '^https://github\.com/([^/]+)/([^/]+)/') {
+            "Installer-URL ist nicht GitHub - Tokenpruefung uebersprungen." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return
+          }
+          $owner = $matches[1]; $repo = $matches[2]
+          $env:GH_TOKEN = $env:INSTALLER_TOKEN
+          $wer = (& gh api /user --jq .login 2>&1 | Out-String).Trim()
+          "Token gehoert zu: $wer" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          & gh api "/repos/$owner/$repo" --jq .full_name 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            "FEHLER: das Token hat keinen Zugriff auf $owner/$repo - im Fine-grained PAT fehlt der Repository-Zugriff oder Contents: Read." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } else {
+            "Token liest $owner/$repo." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+          $LASTEXITCODE = 0
+
       - name: Installer laden
         shell: pwsh
         run: |
