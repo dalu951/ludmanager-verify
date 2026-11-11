@@ -106,34 +106,45 @@ jobs:
         shell: pwsh
         run: |
           # Gate 3 von Ticket 34: der obfuskierte Bau soll Defender nicht wecken.
-          # Die Runner schliessen den Arbeitsordner D:\a vom Echtzeitschutz aus -
-          # dort wird jeder Scan stillschweigend uebersprungen (im Lauf 42998171206
-          # stand "Scanning ... was skipped"). Deshalb scannen wir eine Kopie unter
-          # C:\Users\Public und lassen den Lauf scheitern, wenn Defender auslaesst.
+          # Die Images von windows-latest schliessen ganze Laufwerke aus
+          # (ExclusionPath C:\ und D:\), dann meldet MpCmdRun "was skipped" - auch
+          # fuer EICAR. Deshalb erst die Ausschluesse entfernen und mit EICAR
+          # beweisen, dass der Scan wirklich arbeitet. Achtung: MpCmdRun endet auch
+          # bei einem Fund mit 0, das Urteil steht im Text und in Get-MpThreatDetection.
           # SmartScreen laesst sich auf einem Runner nicht ausloesen (keine
           # Reputation, niemand klickt den Dialog weg) - das bleibt Handarbeit.
           $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
           if (-not (Test-Path $mp)) { throw 'MpCmdRun.exe fehlt' }
-          $ziel = Join-Path $env:PUBLIC 'scan'
-          New-Item -ItemType Directory -Force -Path $ziel | Out-Null
-          $probe = Join-Path $ziel 'installer.exe'
+          "Ausschluesse vorher: $((Get-MpPreference).ExclusionPath -join ', ')" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          Remove-MpPreference -ExclusionPath 'C:\', 'D:\' -ErrorAction SilentlyContinue
+          "Ausschluesse nachher: '$((Get-MpPreference).ExclusionPath -join ', ')'" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $dir = Join-Path $env:PUBLIC 'scan'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $eicar = Join-Path $dir 'eicar.com'
+          Set-Content -Path $eicar -NoNewline -Encoding ascii -Value 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+          $probe = Join-Path $dir 'installer.exe'
           Copy-Item $env:INSTALLER $probe -Force
-          $hash = (Get-FileHash -Algorithm SHA256 $probe).Hash
-          "Kopie fuer den Scan: $probe" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "SHA256 der Kopie: $hash" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "Prüfkopie: $probe" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "SHA256 der Kopie: $((Get-FileHash -Algorithm SHA256 $probe).Hash)" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           & $mp -SignatureUpdate 2>&1 | Out-Host
-          $out = (& $mp -Scan -ScanType 3 -File $probe 2>&1) -join [Environment]::NewLine
-          $code = $LASTEXITCODE
-          $out | Out-Host
-          $out | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $kontrolle = (& $mp -Scan -ScanType 3 -File $eicar 2>&1) -join [Environment]::NewLine
+          $kontrolle | Out-Host
+          $kontrolle | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($kontrolle -match 'was skipped') { throw 'Kontrolle: Defender hat die EICAR-Datei uebersprungen - der Scan arbeitet nicht.' }
+          if ($kontrolle -notmatch 'found \d+ threats') { throw 'Kontrolle: EICAR wurde nicht erkannt - der Scan arbeitet nicht.' }
+          'Kontrolle: EICAR wurde erkannt, der Scan arbeitet.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $befund = (& $mp -Scan -ScanType 3 -File $probe 2>&1) -join [Environment]::NewLine
+          $befund | Out-Host
+          $befund | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           $LASTEXITCODE = 0
-          if ($out -match 'was skipped') {
-            throw 'Defender hat die Datei uebersprungen - der Scan beweist nichts.'
-          }
-          if ($code -eq 2) { throw 'Defender meldet den Installer als Bedrohung (MpCmdRun Exit 2).' }
-          if ($code -ne 0) { throw "Defender-Scan endete mit Exit $code." }
-          $funde = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object { $_.Resources -match 'installer' })
-          "Defender: keine Fundstelle am Installer (Exit 0), bekannte Funde zum Pfad: $($funde.Count)." |
+          if ($befund -match 'was skipped') { throw 'Defender hat den Installer uebersprungen - der Scan beweist nichts.' }
+          if ($befund -match 'found (\d+) threats') { throw "Defender meldet $($Matches[1]) Funde am Installer." }
+          $funde = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object { $_.Resources -match 'installer\.exe' })
+          if ($funde.Count -gt 0) { throw "Defender fuehrt $($funde.Count) Funde zum Installer." }
+          'Defender: keine Fundstelle am Installer, Kontrolle mit EICAR bestanden.' |
             Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: signtool finden
