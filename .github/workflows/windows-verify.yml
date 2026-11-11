@@ -1,0 +1,166 @@
+name: Windows-Installer prüfen
+
+# Der eine Beweisplatz für Windows (Ticket 44 „Windows-Installer: Bauplatz und
+# Signatur"): Der Installer wird auf dem Linux-Rechner gebaut und veröffentlicht;
+# dieser Workflow lädt genau das veröffentlichte Artefakt und prüft, was ein
+# Kunde nach dem Doppelklick sieht. Er baut nichts und signiert nichts.
+#
+# Aufruf: Actions → „Windows-Installer prüfen" → Run workflow.
+# Ohne Eingabe wird vars.LUDMANAGER_INSTALLER_URL genommen (Repository-Variable),
+# damit der Kanal die einzige Quelle bleibt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      installer_url:
+        description: 'URL des Installers (leer = Repository-Variable LUDMANAGER_INSTALLER_URL)'
+        required: false
+      require_signature:
+        description: 'Signatur verlangen (für interne Testartefakte auf false stellen)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Installieren, prüfen, deinstallieren
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      INSTALLER_URL: ${{ inputs.installer_url || vars.LUDMANAGER_INSTALLER_URL }}
+      INSTALLER_TOKEN: ${{ secrets.INSTALLER_TOKEN }}
+    steps:
+      - name: URL bestimmen
+        shell: pwsh
+        run: |
+          if (-not $env:INSTALLER_URL) {
+            throw 'Keine Installer-URL: Eingabe leer und Repository-Variable LUDMANAGER_INSTALLER_URL nicht gesetzt.'
+          }
+          "Installationsquelle: $env:INSTALLER_URL" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Installer laden
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'ludmanager-verify'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $file = Join-Path $dir 'installer.exe'
+          # Das Artefakt liegt in einem privaten Repo; der Lauf hier ist oeffentlich (freie Minuten).
+          $headers = @{}
+          if ($env:INSTALLER_TOKEN) {
+            $headers['Authorization'] = "Bearer $env:INSTALLER_TOKEN"
+          }
+          Invoke-WebRequest -Uri $env:INSTALLER_URL -Headers $headers -OutFile $file -MaximumRetryCount 3
+          $hash = (Get-FileHash -Algorithm SHA256 $file).Hash
+          "SHA256: $hash" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "INSTALLER=$file" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INSTALLER_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: signtool finden
+        shell: pwsh
+        run: |
+          $roots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")
+          $signtool = Get-ChildItem -Path $roots -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe nicht gefunden' }
+          "SIGNTOOL=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "signtool: $($signtool.FullName)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Signatur des Installers
+        shell: pwsh
+        run: |
+          $required = '${{ inputs.require_signature }}' -eq 'true'
+          & $env:SIGNTOOL verify /pa /all $env:INSTALLER 2>&1 | Tee-Object -Variable out | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            if ($required) { throw 'Installer ist nicht gültig signiert (signtool verify /pa /all).' }
+            "WARNUNG: unsigniert (require_signature=false) - nur ein internes Testartefakt." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } else {
+            "Signatur: gültig" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+          $out | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Still installieren
+        shell: pwsh
+        run: |
+          # perMachine: false -> Installation für den aktuellen Benutzer.
+          $p = Start-Process -FilePath $env:INSTALLER -ArgumentList '/currentuser', '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer endete mit $($p.ExitCode)" }
+          Start-Sleep -Seconds 5
+
+      - name: Eintrag, Startmenü und Dateien prüfen
+        shell: pwsh
+        run: |
+          $uninstallRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+          $entry = Get-ChildItem $uninstallRoot | ForEach-Object { Get-ItemProperty $_.PSPath } |
+            Where-Object { $_.DisplayName -like 'Ludmanager*' } | Select-Object -First 1
+          if (-not $entry) { throw 'Kein Eintrag unter HKCU ...\Uninstall (Apps & Features).' }
+
+          "DisplayName: $($entry.DisplayName)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "DisplayVersion: $($entry.DisplayVersion)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "QuietUninstallString: $($entry.QuietUninstallString)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if (-not $entry.QuietUninstallString) { throw 'QuietUninstallString fehlt - stille Deinstallation nicht möglich.' }
+
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Ludmanager.lnk'
+          if (-not (Test-Path $shortcut)) { throw "Startmenü-Verknüpfung fehlt: $shortcut" }
+          "Startmenü: $shortcut" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+          $dir = $entry.InstallLocation
+          if (-not $dir) { $dir = Join-Path $env:LOCALAPPDATA 'Programs\Ludmanager' }
+          $exe = Join-Path $dir 'Ludmanager.exe'
+          if (-not (Test-Path $exe)) { throw "Ludmanager.exe fehlt: $exe" }
+          if (-not (Test-Path (Join-Path $dir 'runtime\manifest.json'))) { throw 'runtime/manifest.json fehlt - Laufzeit nicht mitinstalliert.' }
+          "Installationsordner: $dir" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+          "UNINSTALL_STRING=$($entry.QuietUninstallString)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INSTALL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHORTCUT=$shortcut" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: App-EXE prüfen
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:INSTALL_DIR 'Ludmanager.exe'
+          & $env:SIGNTOOL verify /pa /all $exe 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            if ('${{ inputs.require_signature }}' -eq 'true') { throw 'Ludmanager.exe ist nicht gültig signiert.' }
+          }
+
+      - name: App startet und lebt
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:INSTALL_DIR 'Ludmanager.exe'
+          $app = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 30
+          $app.Refresh()
+          if ($app.HasExited) { throw "App ist nach 30 s beendet (Exitcode $($app.ExitCode))." }
+          "App läuft nach 30 s (PID $($app.Id))" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          Stop-Process -Id $app.Id -Force
+
+      - name: Still deinstallieren und aufräumen prüfen
+        shell: pwsh
+        run: |
+          $cmd = $env:UNINSTALL_STRING.Trim()
+          if ($cmd.StartsWith('"')) {
+            $end = $cmd.IndexOf('"', 1)
+            $exePath = $cmd.Substring(1, $end - 1)
+            $rest = $cmd.Substring($end + 1).Trim()
+          } else {
+            $parts = $cmd.Split(' ', 2)
+            $exePath = $parts[0]
+            $rest = if ($parts.Length -gt 1) { $parts[1] } else { '' }
+          }
+          $args = @($rest -split ' ' | Where-Object { $_ }) + @('/S')
+          $p = Start-Process -FilePath $exePath -ArgumentList $args -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Deinstaller endete mit $($p.ExitCode)" }
+          Start-Sleep -Seconds 10
+
+          $problems = @()
+          if (Test-Path $env:INSTALL_DIR) { $problems += "Installationsordner existiert noch: $env:INSTALL_DIR" }
+          if (Test-Path $env:SHORTCUT) { $problems += "Startmenü-Verknüpfung existiert noch: $env:SHORTCUT" }
+          $still = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+            ForEach-Object { Get-ItemProperty $_.PSPath } |
+            Where-Object { $_.DisplayName -like 'Ludmanager*' }
+          if ($still) { $problems += 'Uninstall-Eintrag existiert noch: ' + ($still.DisplayName -join ', ') }
+          if ($problems.Count -gt 0) { throw ($problems -join '; ') }
+          "Deinstallation: Ordner, Verknüpfung und Registry-Eintrag sind weg" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
