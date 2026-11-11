@@ -46,10 +46,20 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'ludmanager-verify'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           $file = Join-Path $dir 'installer.exe'
+          $headers = @{}
+          if ($env:INSTALLER_TOKEN -and $env:INSTALLER_URL.StartsWith('https://github.com/')) {
+            $headers['Authorization'] = "Bearer $env:INSTALLER_TOKEN"
+          }
           $geholt = $false
-          # Release-Assets privater Repos liefert GitHub nur ueber die API; die Browser-URL
-          # antwortet ohne Anmeldung mit 404. gh kennt den Weg und nimmt den Lesetoken.
-          if ($env:INSTALLER_TOKEN -and $env:INSTALLER_URL -match '^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)$') {
+          try {
+            Invoke-WebRequest -Uri $env:INSTALLER_URL -Headers $headers -OutFile $file -MaximumRetryCount 3
+            $geholt = $true
+          } catch {
+            Write-Host "direkter Abruf gescheitert: $($_.Exception.Message)"
+          }
+          # Browser-URLs privater Repos antworten grundsaetzlich mit 404; dort holt gh das Asset
+          # ueber die API, wenn ein Lesetoken bereitsteht. Oeffentliche Assets brauchen das nicht.
+          if (-not $geholt -and $env:INSTALLER_TOKEN -and $env:INSTALLER_URL -match '^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)$') {
             $owner = $matches[1]; $repo = $matches[2]; $tag = $matches[3]; $name = $matches[4]
             $env:GH_TOKEN = $env:INSTALLER_TOKEN
             $zwischen = Join-Path $env:RUNNER_TEMP 'gh-download'
@@ -60,11 +70,7 @@ jobs:
               $geholt = $true
             }
           }
-          if (-not $geholt) {
-            $headers = @{}
-            if ($env:INSTALLER_TOKEN) { $headers['Authorization'] = "Bearer $env:INSTALLER_TOKEN" }
-            Invoke-WebRequest -Uri $env:INSTALLER_URL -Headers $headers -OutFile $file -MaximumRetryCount 3
-          }
+          if (-not $geholt) { throw "Installer konnte nicht geladen werden: $env:INSTALLER_URL" }
           $hash = (Get-FileHash -Algorithm SHA256 $file).Hash
           "SHA256: $hash" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           "INSTALLER=$file" | Out-File -FilePath $env:GITHUB_ENV -Append
