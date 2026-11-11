@@ -105,12 +105,18 @@ jobs:
         shell: pwsh
         run: |
           # perMachine: false -> Installation fuer den aktuellen Benutzer.
+          # Die Datei kommt per HTTP und traegt dann die Markierung „aus dem Internet“.
+          # Ohne Unblock-File schiebt SmartScreen ein Fenster davor, das auf einem
+          # Runner niemand wegklickt - der Installer startet nie.
+          Unblock-File -Path $env:INSTALLER
           # --updated haelt den Installer davon ab, die App nach dem Einrichten zu starten:
           # ein laufender Ludmanager erbt die Handles und laesst jeden Wait auf den
           # Installer ewig haengen (genau das ist im ersten Lauf passiert).
           $p = Start-Process -FilePath $env:INSTALLER -ArgumentList '/currentuser', '/S', '--updated' -PassThru
           if (-not $p.WaitForExit(900000)) {
-            Get-Process | Where-Object { $_.ProcessName -match 'Ludmanager' } | Select-Object Id, ProcessName, StartTime | Out-Host
+            Get-Process | Where-Object { $_.ProcessName -match 'Ludmanager|installer' } | Select-Object Id, ProcessName, StartTime | Out-Host
+            Get-ChildItem $env:TEMP -Directory | Select-Object Name, LastWriteTime | Out-Host
+            Get-ChildItem "$env:LOCALAPPDATA\Programs" -ErrorAction SilentlyContinue | Select-Object Name | Out-Host
             throw 'Installer hat nach 15 Minuten nicht beendet'
           }
           if ($p.ExitCode -ne 0) { throw "Installer endete mit $($p.ExitCode)" }
