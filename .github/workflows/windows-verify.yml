@@ -143,7 +143,14 @@ jobs:
           if (-not $dir) { $dir = Join-Path $env:LOCALAPPDATA 'Programs\Ludmanager' }
           $exe = Join-Path $dir 'Ludmanager.exe'
           if (-not (Test-Path $exe)) { throw "Ludmanager.exe fehlt: $exe" }
-          if (-not (Test-Path (Join-Path $dir 'runtime\manifest.json'))) { throw 'runtime/manifest.json fehlt - Laufzeit nicht mitinstalliert.' }
+          # electron-builder legt extraResources unter resources\ ab; aeltere Baeue hatten
+          # die Laufzeit direkt im Installationsordner. Beides ist in Ordnung.
+          $manifest = Join-Path $dir 'resources\runtime\manifest.json'
+          if (-not (Test-Path $manifest)) { $manifest = Join-Path $dir 'runtime\manifest.json' }
+          if (-not (Test-Path $manifest)) { throw 'runtime/manifest.json fehlt (weder resources\runtime noch runtime) - Laufzeit nicht mitinstalliert.' }
+          $mj = Get-Content $manifest -Raw | ConvertFrom-Json
+          if (-not $mj.contentHash) { throw 'runtime/manifest.json ohne contentHash' }
+          "Laufzeit: contentHash $($mj.contentHash), target $($mj.target)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           "Installationsordner: $dir" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
           "UNINSTALL_STRING=$($entry.QuietUninstallString)" | Out-File -FilePath $env:GITHUB_ENV -Append
