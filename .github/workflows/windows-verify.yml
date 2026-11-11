@@ -106,27 +106,35 @@ jobs:
         shell: pwsh
         run: |
           # Gate 3 von Ticket 34: der obfuskierte Bau soll Defender nicht wecken.
-          # SmartScreen lässt sich auf einem Runner nicht auslösen (keine Reputation,
-          # niemand klickt den Dialog weg) - das bleibt Handarbeit am echten Desktop.
+          # Die Runner schliessen den Arbeitsordner D:\a vom Echtzeitschutz aus -
+          # dort wird jeder Scan stillschweigend uebersprungen (im Lauf 42998171206
+          # stand "Scanning ... was skipped"). Deshalb scannen wir eine Kopie unter
+          # C:\Users\Public und lassen den Lauf scheitern, wenn Defender auslaesst.
+          # SmartScreen laesst sich auf einem Runner nicht ausloesen (keine
+          # Reputation, niemand klickt den Dialog weg) - das bleibt Handarbeit.
           $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
-          if (-not (Test-Path $mp)) {
-            'WARNUNG: MpCmdRun.exe fehlt - Scan uebersprungen.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-            return
-          }
+          if (-not (Test-Path $mp)) { throw 'MpCmdRun.exe fehlt' }
+          $ziel = Join-Path $env:PUBLIC 'scan'
+          New-Item -ItemType Directory -Force -Path $ziel | Out-Null
+          $probe = Join-Path $ziel 'installer.exe'
+          Copy-Item $env:INSTALLER $probe -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $probe).Hash
+          "Kopie fuer den Scan: $probe" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "SHA256 der Kopie: $hash" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           & $mp -SignatureUpdate 2>&1 | Out-Host
-          $out = & $mp -Scan -ScanType 3 -File $env:INSTALLER 2>&1
+          $out = (& $mp -Scan -ScanType 3 -File $probe 2>&1) -join [Environment]::NewLine
           $code = $LASTEXITCODE
           $out | Out-Host
-          "Defender (MpCmdRun -Scan -ScanType 3): Exit $code" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           $out | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           $LASTEXITCODE = 0
-          if ($code -eq 0) {
-            'Defender: keine Fundstelle am Installer.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          } elseif ($code -eq 2) {
-            throw 'Defender meldet den Installer als Bedrohung (MpCmdRun Exit 2).'
-          } else {
-            "WARNUNG: Defender-Scan endete mit Exit $code (kein Fund gemeldet)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($out -match 'was skipped') {
+            throw 'Defender hat die Datei uebersprungen - der Scan beweist nichts.'
           }
+          if ($code -eq 2) { throw 'Defender meldet den Installer als Bedrohung (MpCmdRun Exit 2).' }
+          if ($code -ne 0) { throw "Defender-Scan endete mit Exit $code." }
+          $funde = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object { $_.Resources -match 'installer' })
+          "Defender: keine Fundstelle am Installer (Exit 0), bekannte Funde zum Pfad: $($funde.Count)." |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: signtool finden
         shell: pwsh
